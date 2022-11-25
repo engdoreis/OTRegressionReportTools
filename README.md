@@ -1,2 +1,2 @@
 # OTRegressionReportTools
-Set of tools to parser the Opentitan nightly regression report.
+Set of tools to parse the Opentitan nightly regression report.
