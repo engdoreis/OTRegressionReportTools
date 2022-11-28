@@ -14,19 +14,25 @@ class Github:
     self.throttling_limit = 2
     self.throttling = 0
 
-  def get_issues(self, pattern, by='name'):
-    url = self.base_url + '/issues?q=is%3Aopen+is%3Aissue' + f'+{pattern}'
-    self.throttling = (self.throttling + 1) % self.throttling_limit
-    # if self.throttling == 0:
-      # time.sleep(0.05)
-    r = requests.get(url)
-    if r.status_code != 200:
-      return [{'name': 'error', 'number': r.status_code,'link' : ' '}]
-      # print(f'searching {pattern} by {by}, returned {r.status_code}, consider reducing the throttling limit')
+  def load(self, names):
+    url = self.base_url + f'/issues?q=is%3Aissue+{names[0]}'
+    for name in names[1:]:
+      url += f'+OR+{name}'
 
+    r = requests.get(url + '+is%3Aopen')
+    self.opened_issues_page = r.text
+    r = requests.get(url + '+is%3Aclosed')
+    self.closed_issues_page = r.text
+
+  def get_issues(self, pattern, by='name', opened=True):
     if by == 'name':
-      res = re.findall(r'"Link to Issue\.\s(.*' + pattern + r'.*)"\shref="([\w\/\d]+)">', r.text)
+      html = self.opened_issues_page if opened else self.closed_issues_page
+      res = re.findall(r'"Link to Issue\.\s(.*' + pattern + r'.*)"\shref="([\w\/\d]+)">', html)
     else:
+      url = self.base_url + '/issues?q=is%3Aissue' + f'+{pattern}' + ('+is%3Aopen' if opened else '+is%3Aclosed')
+      r = requests.get(url)
+      if r.status_code != 200:
+        return [{'name': 'error', 'number': r.status_code,'link' : f'https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/{r.status_code}'}]
       res = re.findall(r'"Link to Issue\.\s(.*)"\shref="([\w\/\d]+)">', r.text)
 
     if res:
@@ -165,32 +171,40 @@ class RegressionReportParser:
     # Try to find possible github issues linked.
     def parse_github_issue(git, name):
       if name in ['Build-seed', 'Github revision']:
-        return ' '
-      issues = git.get_issues(name, by='content')
-      if issues:
-        return ' '.join('<a href="{}">#{}</a>'.format(issue['link'],issue['number']) for issue in issues)
-      issues = git.get_issues(name, by='name')
-      if issues:
-        return  ' '.join('<a href="{}">#{}</a>'.format(issue['link'],issue['number']) for issue in issues)
-      return ' '
+        return ' ', ' '
+      issue_parser = lambda issues: ' '.join('<a href ="{}">#{}</a>'.format(issue['link'],issue['number']) for issue in issues) if issues else ' '
+
+      opened_links = issue_parser(git.get_issues(name, by='name'))
+      closed_links = issue_parser(git.get_issues(name, by='name', opened=False))
+      if opened_links != ' ' or closed_links != ' ':
+        return opened_links, closed_links
+
+      opened_links = issue_parser(git.get_issues(name, by='content'))
+      closed_links = issue_parser(git.get_issues(name, by='content', opened=False))
+      return opened_links, closed_links
 
     if self.cfg.attach_github_issues:
       git = Github('lowrisc', 'opentitan')
-      df.insert(0, 'Issue',  df['Tests'].apply(lambda v: parse_github_issue(git, v)))
+      git.load(df['Tests'].values.flatten().tolist())
+      issues_col, closed_issues_col = zip(*df['Tests'].apply(lambda v: parse_github_issue(git, v)))
+      df.insert(1, 'Issues', issues_col)
+      df['Closed Issues'] =  closed_issues_col
 
     return df.reset_index(drop=True)
 
   def report_formating(self, value):
-    formating = "background: {};color: {}"
+    format = ' '
+    formating = lambda background, foreground: "background: {};color: {}"\
+              .format(background, foreground if self.cfg.hide_passrate else "white")
     try:
       if float(value) == 0:
-        formating = formating.format("darkred", "darkred" if self.cfg.hide_passrate else "white")
+        format = formating("darkred", "darkred")
       elif float(value) == 100:
-        formating = formating.format("darkgreen", "darkgreen" if self.cfg.hide_passrate else "white")
+        format = formating("darkgreen", "darkgreen")
       elif float(value) < 100:
-        formating = formating.format("darkgoldenrod", "darkgoldenrod" if self.cfg.hide_passrate else "white")
+        format = formating("darkgoldenrod", "darkgoldenrod")
     finally:
-      return formating
+      return format
 
   def format_dataframe(self, df):
     return df.style.applymap(self.report_formating)\
@@ -232,3 +246,9 @@ class RegressionReportParser:
     df.columns = ['Date', 'Count']
     df['Date'] = df['Date'].apply(lambda x: pd.np.nan if type(x) == str else x)
     return df[~df.Date.isnull()]
+
+if __name__ == '__main__':
+  git = Github('lowrisc', 'opentitan')
+  git.load(['chip_sw_power_idle_load', 'chip_sw_power_sleep_load'])
+  print(git.get_issues('rom_e2e_keymgr_init', by='content'))
+  print(git.get_issues('rom_e2e_keymgr_init', by='content', opened=False))
